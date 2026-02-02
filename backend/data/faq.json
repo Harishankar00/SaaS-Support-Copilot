@@ -1,0 +1,22 @@
+[
+  {
+    "question": "How do I change my subscription plan?",
+    "answer": "Navigate to 'Settings' > 'Billing' and select 'Change Plan'. Changes take effect immediately."
+  },
+  {
+    "question": "What is the refund policy?",
+    "answer": "We offer a full refund within 30 days of purchase if you are not satisfied with the service."
+  },
+  {
+    "question": "Does the platform support multi-factor authentication (MFA)?",
+    "answer": "Yes, you can enable MFA in the 'Security' tab of your account profile."
+  },
+  {
+    "question": "Can I export my data to a CSV file?",
+    "answer": "Yes, use the 'Export' button located in the 'Analytics' dashboard to download your data in CSV format."
+  },
+  {
+    "question": "How do I contact customer support?",
+    "answer": "You can reach our support team via the 'Help' icon in the bottom right corner or email support@saas-copilot.com."
+  }
+]
