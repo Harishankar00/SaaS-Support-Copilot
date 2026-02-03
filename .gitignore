@@ -17,3 +17,6 @@ backend/.env
 .DS_Store
 .env
 *.log
+backend/users.db-wal
+backend/users.db-shm
+backend/users.db
