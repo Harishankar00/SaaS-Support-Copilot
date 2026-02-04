@@ -20,3 +20,4 @@ backend/.env
 backend/users.db-wal
 backend/users.db-shm
 backend/users.db
+backend/copilot.db
