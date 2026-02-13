@@ -21,3 +21,5 @@ backend/users.db-wal
 backend/users.db-shm
 backend/users.db
 backend/copilot.db
+backend/copilot.db-shm
+backend/copilot.db-wal
