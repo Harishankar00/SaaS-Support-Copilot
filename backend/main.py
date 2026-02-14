@@ -1,13 +1,24 @@
-import os, sqlite3, time, traceback
-from fastapi import FastAPI, HTTPException
+import os, time, traceback, io
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-from rag_engine import get_retriever
-from dotenv import load_dotenv
+from sqlalchemy.orm import Session
 from huggingface_hub import InferenceClient
+from pypdf import PdfReader
+
+# Custom Modules
+from database import get_db, engine
+import models
+# FIX: Import the new direct search function
+from rag_engine import search_similar_documents, index_document
+from dotenv import load_dotenv
 
 load_dotenv()
+
+# 1. Create Tables in Postgres
+models.Base.metadata.create_all(bind=engine)
+
 app = FastAPI(title="SaaS Support Copilot Pro")
 
 app.add_middleware(
@@ -18,24 +29,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-DB_PATH = "copilot.db"
-
-def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT UNIQUE NOT NULL, password TEXT NOT NULL, email TEXT)')
-    cursor.execute('CREATE TABLE IF NOT EXISTS chat_history (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL, chat_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP)')
-    conn.commit()
-    conn.close()
-
-init_db()
-
 # --- AI Configuration ---
 TOKEN = os.getenv("HF_TOKEN", "").strip().replace('"', '').replace("'", "")
 client = InferenceClient(api_key=TOKEN)
 MODEL_ID = "meta-llama/Llama-3.1-8B-Instruct"
 
-# --- Data Models ---
+# --- Pydantic Models ---
+class UserAuth(BaseModel):
+    username: str
+    password: str
+    email: Optional[str] = None
+
 class ChatRequest(BaseModel):
     query: str
     username: str
@@ -46,135 +50,155 @@ class ChatResponse(BaseModel):
     sources: List[dict]
     status: str
 
-# MISSING MODEL RESTORED
-class UserAuth(BaseModel):
-    username: str
-    password: str
-    email: Optional[str] = None
-
-def save_message(username, chat_id, role, content):
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO chat_history (username, chat_id, role, content) VALUES (?, ?, ?, ?)", 
-                       (username, chat_id, role, content))
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"DB Error: {e}")
-
-# --- Auth Endpoints (RESTORED) ---
+# --- Auth Endpoints ---
 
 @app.post("/signup")
-async def signup(user: UserAuth):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT INTO users (username, password, email) VALUES (?, ?, ?)", 
-                       (user.username, user.password, user.email))
-        conn.commit()
-        return {"status": "success", "message": "User created"}
-    except sqlite3.IntegrityError:
-        raise HTTPException(status_code=400, detail="Username already exists")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        conn.close()
+async def signup(user_data: UserAuth, db: Session = Depends(get_db)):
+    existing = db.query(models.User).filter(models.User.username == user_data.username).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already taken")
+    
+    new_user = models.User(
+        username=user_data.username,
+        password=user_data.password, 
+        email=user_data.email
+    )
+    db.add(new_user)
+    db.commit()
+    return {"status": "success"}
 
 @app.post("/login")
-async def login(credentials: UserAuth):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT username FROM users WHERE username = ? AND password = ?", 
-                   (credentials.username, credentials.password))
-    user = cursor.fetchone()
-    conn.close()
+async def login(creds: UserAuth, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(
+        models.User.username == creds.username, 
+        models.User.password == creds.password
+    ).first()
     
     if user:
-        return {"status": "success", "username": user[0], "token": "fake-jwt-token"}
+        return {"status": "success", "username": user.username}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
-# --- Chat & History Endpoints ---
+# --- Document Upload Endpoint ---
 
-@app.get("/chats/{username}")
-async def get_user_chats(username: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT DISTINCT chat_id FROM chat_history WHERE username = ? ORDER BY timestamp DESC", (username,))
-    chats = [row[0] for row in cursor.fetchall()]
-    conn.close()
-    return chats
+@app.post("/upload")
+async def upload_document(
+    file: UploadFile = File(...),
+    username: str = Form(...)
+):
+    try:
+        print(f"📂 Received file: {file.filename} from {username}")
+        
+        content = await file.read()
+        text = ""
+        
+        if file.filename.endswith(".pdf"):
+            pdf = PdfReader(io.BytesIO(content))
+            text = "\n".join([page.extract_text() for page in pdf.pages if page.extract_text()])
+        else:
+            text = content.decode("utf-8")
+            
+        if not text.strip():
+            raise HTTPException(status_code=400, detail="File is empty or unreadable")
 
-@app.get("/history/{username}/{chat_id}")
-async def get_chat_history(username: str, chat_id: str):
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT role, content FROM chat_history WHERE username = ? AND chat_id = ? ORDER BY timestamp ASC", (username, chat_id))
-    history = [{"role": row[0], "content": row[1]} for row in cursor.fetchall()]
-    conn.close()
-    return history
+        metadata = {"filename": file.filename, "user_id": username, "type": "upload"}
+        count = index_document(text, metadata)
+        
+        return {"status": "success", "chunks": count, "filename": file.filename}
+
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+
+# --- Chat Endpoint (FIXED) ---
 
 @app.post("/chat", response_model=ChatResponse)
-async def chat_endpoint(request: ChatRequest):
-    save_message(request.username, request.chat_id, "user", request.query)
+async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
+    user_obj = db.query(models.User).filter(models.User.username == request.username).first()
     
-    # 1. Greeting Handler
-    if request.query.lower().strip() in ["hi", "hello", "hey", "good morning"]:
-        msg = f"Hello {request.username}! I'm your NeuroStack Copilot. How can I help?"
-        save_message(request.username, request.chat_id, "assistant", msg)
-        return {"answer": msg, "sources": [], "status": "greeting"}
+    if not user_obj:
+        raise HTTPException(status_code=404, detail="User not found. Please log in again.")
+
+    # 1. Save User Message
+    user_msg = models.ChatHistory(
+        chat_id=request.chat_id, 
+        role="user", 
+        content=request.query, 
+        user_id=user_obj.id
+    )
+    db.add(user_msg)
+    db.commit()
+
+    # 2. Greeting Check
+    if request.query.lower().strip() in ["hi", "hello", "hey"]:
+        return {"answer": f"Hi {request.username}! I'm ready to help with your documents.", "sources": [], "status": "greeting"}
 
     try:
-        # 2. Retrieval
-        vector_db = get_retriever()
-        docs_and_scores = vector_db.similarity_search_with_score(request.query, k=3)
-        valid_results = [res for res in docs_and_scores if res[1] < 1.1]
+        # 3. Retrieval from Supabase (USING NEW DIRECT FUNCTION)
+        # This fixes the NotImplementedError
+        valid_results = search_similar_documents(request.query, k=4)
 
         if not valid_results:
-            msg = "I'm sorry, I couldn't find any information on that in our documentation."
-            save_message(request.username, request.chat_id, "assistant", msg)
-            return {"answer": msg, "sources": [], "status": "no_context"}
+            return {"answer": "I couldn't find relevant info in your uploaded documents.", "sources": [], "status": "no_context"}
 
-        # 3. Generation
-        context = "\n\n".join([res[0].page_content for res in valid_results])
-        answer = ""
+        # 4. Generate Answer
+        context_text = "\n\n".join([f"Source ({doc.metadata.get('filename', 'System')}): {doc.page_content}" for doc, _ in valid_results])
         
-        for attempt in range(2):
-            try:
-                print(f"DEBUG: AI Attempt {attempt + 1}...")
-                response = client.chat_completion(
-                    model=MODEL_ID,
-                    messages=[
-                        {"role": "system", "content": f"Use this context to answer: {context}"},
-                        {"role": "user", "content": request.query}
-                    ],
-                    max_tokens=500,
-                    temperature=0.1
-                )
-                answer = response.choices[0].message.content
-                if answer: break
-            except Exception as ai_err:
-                print(f"AI Error: {ai_err}")
-                time.sleep(1)
+        system_prompt = (
+            "You are a helpful SaaS Copilot. Answer the user's question using ONLY the context below. "
+            "Always cite the source filename when stating a fact. "
+            f"\n\nContext:\n{context_text}"
+        )
 
-        if not answer:
-            return {"answer": "The AI is currently busy. Please try again.", "sources": [], "status": "error"}
+        response = client.chat_completion(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request.query}
+            ],
+            max_tokens=500,
+            temperature=0.1
+        )
+        answer = response.choices[0].message.content
 
-        # 4. Success
-        save_message(request.username, request.chat_id, "assistant", answer)
-        
+        # 5. Save Assistant Reply
+        bot_msg = models.ChatHistory(
+            chat_id=request.chat_id, 
+            role="assistant", 
+            content=answer, 
+            user_id=user_obj.id
+        )
+        db.add(bot_msg)
+        db.commit()
+
+        # 6. Format Sources
         sources = [
-            {"question": d.metadata.get("question"), "score": f"{max(0, 100 - int(score * 50))}%"} 
+            {"question": d.metadata.get("filename", "FAQ"), "score": f"{int(score * 100)}%"} 
             for d, score in valid_results
         ]
         
         return {"answer": answer, "sources": sources, "status": "success"}
 
     except Exception as e:
-        print("--- CRITICAL ERROR TRACEBACK ---")
         traceback.print_exc()
-        return {"answer": "I encountered an internal error. Check your terminal for logs.", "sources": [], "status": "error"}
+        return {"answer": "I encountered an error. Please check logs.", "sources": [], "status": "error"}
 
-@app.get("/")
-def read_root():
-    return {"message": "API Running"}
+# --- History Endpoints ---
+
+@app.get("/chats/{username}")
+async def get_chats(username: str, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user: return []
+    chats = db.query(models.ChatHistory.chat_id).filter(models.ChatHistory.user_id == user.id).distinct().all()
+    return [c[0] for c in chats]
+
+@app.get("/history/{username}/{chat_id}")
+async def get_history(username: str, chat_id: str, db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.username == username).first()
+    if not user: return []
+    
+    msgs = db.query(models.ChatHistory).filter(
+        models.ChatHistory.chat_id == chat_id,
+        models.ChatHistory.user_id == user.id
+    ).order_by(models.ChatHistory.timestamp).all()
+    
+    return [{"role": m.role, "content": m.content} for m in msgs]
