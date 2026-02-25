@@ -32,14 +32,13 @@ export default function ChatPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // 1. Initialize Chat & Fetch History
+  // 1. Initialize Chat & Fetch History List
   useEffect(() => {
     if (!user) {
       router.push("/login");
       return;
     }
 
-    const today = new Date().toISOString().split("T")[0];
     const newChatId = `chat_${Date.now()}`;
     setChatId(newChatId);
 
@@ -50,6 +49,26 @@ export default function ChatPage() {
       .catch((err) => console.error("Failed to load chats:", err));
 
   }, [user, router]);
+
+  // NEW FIX: Fetch specific chat history when clicking the sidebar
+  useEffect(() => {
+    if (!user || !chatId) return;
+
+    // If it's a brand new chat we just clicked "+" on, don't fetch anything
+    if (!chatId.includes('_') || !chatList.includes(chatId)) return;
+
+    setLoading(true);
+    fetch(`${process.env.NEXT_PUBLIC_API_URL}/history/${user}/${chatId}`)
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          setMessages(data); // Load the messages into the UI!
+        }
+      })
+      .catch((err) => console.error("Failed to load history:", err))
+      .finally(() => setLoading(false));
+
+  }, [chatId, user, chatList]); // Trigger when chatId changes
 
   // Auto-scroll to bottom
   useEffect(() => {
@@ -196,7 +215,6 @@ export default function ChatPage() {
                     ? "bg-blue-600 text-white border-blue-500 rounded-br-none" 
                     : "bg-slate-800/80 text-slate-200 border-slate-700 rounded-bl-none"
                 }`}>
-                  {/* FIX IS HERE: Wrapped ReactMarkdown in a div with the className */}
                   <div className="prose prose-invert text-sm leading-relaxed max-w-none">
                     <ReactMarkdown>{msg.content}</ReactMarkdown>
                   </div>

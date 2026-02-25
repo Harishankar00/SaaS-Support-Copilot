@@ -10,7 +10,6 @@ from pypdf import PdfReader
 # Custom Modules
 from database import get_db, engine
 import models
-# FIX: Import the new direct search function
 from rag_engine import search_similar_documents, index_document
 from dotenv import load_dotenv
 
@@ -109,7 +108,7 @@ async def upload_document(
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-# --- Chat Endpoint (FIXED) ---
+# --- Chat Endpoint ---
 
 @app.post("/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
@@ -133,12 +132,12 @@ async def chat_endpoint(request: ChatRequest, db: Session = Depends(get_db)):
         return {"answer": f"Hi {request.username}! I'm ready to help with your documents.", "sources": [], "status": "greeting"}
 
     try:
-        # 3. Retrieval from Supabase (USING NEW DIRECT FUNCTION)
-        # This fixes the NotImplementedError
-        valid_results = search_similar_documents(request.query, k=4)
+        # 3. Retrieval from Supabase
+        # FIX: We now ask for 10 chunks, pass your username for security, and removed the old strict filter
+        valid_results = search_similar_documents(request.query, k=10, username=request.username)
 
         if not valid_results:
-            return {"answer": "I couldn't find relevant info in your uploaded documents.", "sources": [], "status": "no_context"}
+            return {"answer": "I couldn't find anything relevant in your uploaded files. Are you sure you uploaded it?", "sources": [], "status": "no_context"}
 
         # 4. Generate Answer
         context_text = "\n\n".join([f"Source ({doc.metadata.get('filename', 'System')}): {doc.page_content}" for doc, _ in valid_results])

@@ -18,52 +18,42 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 print("🔌 Loading embedding model (all-MiniLM-L6-v2)...")
 embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
 
-# 3. DIRECT SEARCH FUNCTION (The Critical Fix)
-def search_similar_documents(query: str, k: int = 4):
+# 3. DIRECT SEARCH FUNCTION (Upgraded for Resumes & Security!)
+def search_similar_documents(query: str, k: int = 10, username: str = None):
     """
-    Embeds the query and calls the 'match_documents' RPC function directly.
-    Bypasses the LangChain wrapper to avoid version mismatch errors.
+    Embeds query, searches DB, and strictly filters by user.
     """
-    # 1. Generate the vector for the user's question
-    query_embedding = embeddings.embed_query(query)
+    # Generate the vector for the user's question
+    query_vector = embeddings.embed_query(query)
     
-    # 2. Call the SQL function we created in Supabase
     params = {
-        "query_embedding": query_embedding,
-        "match_threshold": 0.5, # Only return relevant chunks
-        "match_count": k
+        "query_embedding": query_vector,
+        "match_threshold": 0.2, # Lowered from 0.5! This is critical for resumes to pass the check.
+        "match_count": k # Give me 10 chunks to get the full picture
     }
     
-    # 3. Execute RPC
     response = supabase.rpc("match_documents", params).execute()
     
-    # 4. Convert results to the format main.py expects
     results = []
     for record in response.data:
-        doc = Document(
-            page_content=record['content'],
-            metadata=record['metadata']
-        )
-        # Append tuple: (Document object, similarity score)
-        results.append((doc, record['similarity']))
+        meta = record['metadata']
         
+        # THE BOUNCER: Only keep the chunk if it's a public FAQ OR it belongs to this specific user.
+        if meta.get("source") == "faq_system" or meta.get("user_id") == username:
+            doc = Document(page_content=record['content'], metadata=meta)
+            results.append((doc, record['similarity']))
+            
     return results
 
 # 4. Ingestion Function (Process & Upload)
 def index_document(text: str, metadata: dict):
-    """
-    Takes raw text, splits it, and saves it to Supabase.
-    """
     print(f"📄 Processing document: {metadata.get('filename')}...")
     
-    # Split text into chunks
     splitter = RecursiveCharacterTextSplitter(chunk_size=500, chunk_overlap=50)
     chunks = splitter.split_text(text)
     
-    # Prepare documents
     docs = [Document(page_content=chunk, metadata=metadata) for chunk in chunks]
     
-    # Use LangChain wrapper for INSERTING (Writing works fine, only Reading was buggy)
     vector_store = SupabaseVectorStore(
         client=supabase, 
         embedding=embeddings, 
@@ -77,9 +67,6 @@ def index_document(text: str, metadata: dict):
 
 # 5. Migration Helper
 def seed_initial_data():
-    """
-    Reads faq.json and uploads it to Cloud.
-    """
     if not os.path.exists("data/faq.json"):
         return
 
@@ -103,5 +90,4 @@ def seed_initial_data():
     print("✅ FAQ data seeded to Cloud!")
 
 if __name__ == "__main__":
-    # If run directly, try to seed data
     seed_initial_data()
