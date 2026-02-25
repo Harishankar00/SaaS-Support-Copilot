@@ -1,8 +1,14 @@
 fastapi
 uvicorn
-langchain
+pydantic
+sqlalchemy
+huggingface_hub
+pypdf
+python-multipart
+supabase
 langchain-community
 langchain-huggingface
-faiss-cpu
+langchain-text-splitters
 python-dotenv
-requests
+sentence-transformers
+psycopg2-binary

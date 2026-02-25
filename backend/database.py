@@ -1,32 +1,26 @@
 import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
-from sqlalchemy.pool import NullPool
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# 1. Fetch the Database URL from your .env file
-DATABASE_URL = os.getenv("DATABASE_URL")
+# Get the cloud URL. If it's missing, safely default to a local SQLite file so it doesn't crash.
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./users.db")
 
-# 2. Configure the Engine
-# NOTE: If you are using Supabase's Transaction Pooler (Port 6543), 
-# we use NullPool to let Supabase manage the connections effectively.
-engine = create_engine(
-    DATABASE_URL,
-    poolclass=NullPool if ":6543" in (DATABASE_URL or "") else None
-)
+# Fix a common issue: SQLAlchemy requires 'postgresql://' but Supabase often provides 'postgres://'
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
-# 3. Create a Session factory
-# This is what generates a new 'talk' session for every API request
+# SQLite needs special arguments, Postgres doesn't
+if DATABASE_URL.startswith("sqlite"):
+    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+else:
+    engine = create_engine(DATABASE_URL)
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# 4. Define the Base class for your models
-# All your tables (Users, History) will inherit from this
 Base = declarative_base()
 
-# 5. The Dependency: get_db
-# This is used in main.py to inject the database session into your routes.
 def get_db():
     db = SessionLocal()
     try:
